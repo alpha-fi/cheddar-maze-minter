@@ -1,12 +1,17 @@
 use near_sdk::collections::UnorderedMap;
 use near_sdk::json_types::U128;
-use near_sdk::{env, log, near, require, AccountId, PanicOnDefault};
+use near_sdk::{env, ext_contract, log, near, require, AccountId, Gas, NearToken, PanicOnDefault};
 
 mod storage;
 
 use storage::*;
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
+
+#[ext_contract(ext_cheddar)]
+pub trait ExtSelf {
+    fn ft_mint(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+}
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -63,8 +68,13 @@ impl Contract {
     //
 
     /// only minter can mint
+    #[payable]
     pub fn mint(&mut self, recipient: AccountId, amount: U128) {
         self.assert_minter();
+        require!(
+            env::prepaid_gas() >= Gas::from_tgas(30),
+            "at least 30tgas must be attached"
+        );
         let day = env::block_timestamp_ms() / DAY_MS;
         let amount: u128 = amount.into();
         if day == self.last_mint_day {
@@ -95,13 +105,36 @@ impl Contract {
         require!(minted <= self.user_quota, "user daily mint quota used");
         self.user_mints
             .insert(&recipient, &UserDailyMint { day, minted });
-        // TODO: cross contract call
+
+        ext_cheddar::ext(self.cheddar.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .ft_mint(recipient, amount.into(), None);
+        // ext_cheddar::ft_mint(
+        //     self.cheddar.clone(),
+        //     1.into(),
+        //     None,
+        //     &self.cheddar_id,
+        //     ONE_YOCTO,
+        //     GAS_FOR_FT_TRANSFER,
+        // );
     }
 
     pub fn admin_toggle_active(&mut self) {
-        require!(env::current_account_id() == self.admin, "must be an admin");
+        require!(
+            env::predecessor_account_id() == self.admin,
+            "must be an admin"
+        );
         self.active = !self.active;
         log!("setting contract active={}", self.active);
+    }
+
+    pub fn admin_change_minter(&mut self, minter: AccountId) {
+        require!(
+            env::predecessor_account_id() == self.admin,
+            "must be an admin"
+        );
+        log!("setting new minter: {}", minter);
+        self.minter = minter;
     }
 
     //
@@ -109,7 +142,10 @@ impl Contract {
     //
 
     pub fn assert_minter(&self) {
-        require!(env::current_account_id() == self.minter, "must be a minter");
+        require!(
+            env::predecessor_account_id() == self.minter,
+            "must be a minter"
+        );
         require!(self.active, "contract is disactivated");
     }
 }
@@ -149,8 +185,7 @@ mod tests {
 
     fn setup() -> (VMContext, Contract) {
         let ctx = VMContextBuilder::new()
-            .signer_account_id(minter())
-            .current_account_id(minter())
+            .predecessor_account_id(minter())
             .block_timestamp(DAY_MS * MSECOND)
             .build();
         testing_env!(ctx.clone());
@@ -161,7 +196,7 @@ mod tests {
     #[test]
     fn toggle_active() {
         let (mut ctx, mut ctr) = setup();
-        ctx.current_account_id = admin();
+        ctx.predecessor_account_id = admin();
         testing_env!(ctx);
 
         assert_eq!(ctr.active, true, "must be active by default");
@@ -182,7 +217,7 @@ mod tests {
     #[should_panic(expected = "must be a minter")]
     fn mint_not_minter() {
         let (mut ctx, mut ctr) = setup();
-        ctx.current_account_id = admin();
+        ctx.predecessor_account_id = admin();
         testing_env!(ctx);
         ctr.mint(alice(), 1.into())
     }
