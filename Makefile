@@ -1,5 +1,7 @@
 res:
-	mkdir -p res
+	mkdir res
+abi:
+	mkdir abi
 
 build: res
 	@RUSTFLAGS='-C link-arg=-s' cargo build --target wasm32-unknown-unknown --release
@@ -9,9 +11,9 @@ build-debug: res
 	@RUSTFLAGS='-C link-arg=-s' cargo build --target wasm32-unknown-unknown
 	@cp target/wasm32-unknown-unknown/debug/*.wasm res/
 
-build-abi: res
+build-abi: abi
 	@cargo near abi
-	@cp target/near/*/*_abi.json res
+	@cp target/near/*_abi.json abi/
 
 lint:
 	cargo clippy  -- --no-deps
