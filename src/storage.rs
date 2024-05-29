@@ -7,6 +7,7 @@ pub enum StorageKey {
 }
 
 #[near(serializers=[borsh, json])]
+#[cfg_attr(any(test, not(target_arch = "wasm32")), derive(Debug, PartialEq))]
 pub struct UserDailyMint {
     pub day: u64,
     pub minted: u128,

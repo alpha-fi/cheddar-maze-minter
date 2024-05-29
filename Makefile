@@ -21,3 +21,6 @@ lint-fix:
 
 test-unit:
 	@cargo test --lib
+
+test-unit-debug:
+	@RUST_BACKTRACE=1 cargo test --lib

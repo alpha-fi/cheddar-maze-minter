@@ -65,14 +65,18 @@ impl Contract {
     /// only minter can mint
     pub fn mint(&mut self, recipient: AccountId, amount: U128) {
         self.assert_minter();
-        let day = env::block_timestamp_ms() % DAY_MS;
+        let day = env::block_timestamp_ms() / DAY_MS;
         let amount: u128 = amount.into();
         if day == self.last_mint_day {
             self.daily_mints += amount;
             require!(
-                self.daily_mints <= self.daily_quota && amount <= self.user_quota,
-                "total daily mint quota used"
+                self.daily_mints <= self.daily_quota,
+                format!(
+                    "total daily mint quota exceeded. Used: {}",
+                    self.daily_mints
+                )
             );
+            require!(amount < self.user_quota, "amount above user quota");
         } else {
             self.last_mint_day = day;
             self.daily_mints = amount;
@@ -117,11 +121,155 @@ impl Contract {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::{testing_env, VMContext};
 
-    // #[test]
-    // fn set_then_get_greeting() {
-    //     let mut contract = Contract::default();
-    //     contract.set_greeting("howdy".to_string());
-    //     assert_eq!(contract.get_greeting(), "howdy");
-    // }
+    /// 1ms in nano seconds
+    const MSECOND: u64 = 1_000_000;
+
+    fn cheddar() -> AccountId {
+        // AccountId::new_unvalidated(a.to_owned())
+        "cheddar.near".parse().unwrap()
+    }
+    fn admin() -> AccountId {
+        "admin.near".parse().unwrap()
+    }
+    fn minter() -> AccountId {
+        "minter.near".parse().unwrap()
+    }
+    fn alice() -> AccountId {
+        "alice.near".parse().unwrap()
+    }
+    fn bob() -> AccountId {
+        "bob.near".parse().unwrap()
+    }
+    fn charlie() -> AccountId {
+        "charlie.near".parse().unwrap()
+    }
+
+    fn setup() -> (VMContext, Contract) {
+        let ctx = VMContextBuilder::new()
+            .signer_account_id(minter())
+            .current_account_id(minter())
+            .block_timestamp(DAY_MS * MSECOND)
+            .build();
+        testing_env!(ctx.clone());
+        let ctr = Contract::new(cheddar(), admin(), minter(), U128::from(22), U128::from(10));
+        (ctx, ctr)
+    }
+
+    #[test]
+    fn toggle_active() {
+        let (mut ctx, mut ctr) = setup();
+        ctx.current_account_id = admin();
+        testing_env!(ctx);
+
+        assert_eq!(ctr.active, true, "must be active by default");
+        ctr.admin_toggle_active();
+        assert_eq!(ctr.active, false);
+        ctr.admin_toggle_active();
+        assert_eq!(ctr.active, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be an admin")]
+    fn toggle_active_not_admin() {
+        let (_, mut ctr) = setup();
+        ctr.admin_toggle_active();
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a minter")]
+    fn mint_not_minter() {
+        let (mut ctx, mut ctr) = setup();
+        ctx.current_account_id = admin();
+        testing_env!(ctx);
+        ctr.mint(alice(), 1.into())
+    }
+
+    #[test]
+    fn mint() {
+        let (mut ctx, mut ctr) = setup();
+        ctr.mint(alice(), 1.into());
+        ctr.mint(alice(), 9.into());
+        assert_eq!(
+            ctr.user_mints.get(&alice()).unwrap(),
+            UserDailyMint { minted: 10, day: 1 }
+        );
+        assert_eq!(ctr.daily_mints, 10);
+        assert_eq!(ctr.last_mint_day, 1);
+
+        ctr.mint(bob(), 4.into());
+        // recheck alice
+        assert_eq!(
+            ctr.user_mints.get(&alice()).unwrap(),
+            UserDailyMint { minted: 10, day: 1 }
+        );
+        assert_eq!(
+            ctr.user_mints.get(&bob()).unwrap(),
+            UserDailyMint { minted: 4, day: 1 }
+        );
+
+        ctr.mint(charlie(), 8.into());
+        assert_eq!(ctr.last_mint_day, 1);
+        assert_eq!(ctr.daily_mints, 22);
+
+        ctx.block_timestamp += DAY_MS * MSECOND;
+        testing_env!(ctx.clone());
+        ctr.mint(alice(), 7.into());
+        assert_eq!(ctr.daily_mints, 7);
+        assert_eq!(ctr.last_mint_day, 2);
+
+        // same day but a bit later
+        ctx.block_timestamp += DAY_MS / 2 * MSECOND;
+        testing_env!(ctx.clone());
+        ctr.mint(alice(), 2.into());
+        assert_eq!(ctr.daily_mints, 9);
+        assert_eq!(ctr.last_mint_day, 2);
+        assert_eq!(
+            ctr.user_mints.get(&alice()).unwrap(),
+            UserDailyMint { minted: 9, day: 2 }
+        );
+
+        // few days later
+        ctx.block_timestamp += 3 * DAY_MS * MSECOND;
+        testing_env!(ctx.clone());
+        ctr.mint(alice(), 2.into());
+        assert_eq!(ctr.daily_mints, 2);
+        assert_eq!(ctr.last_mint_day, 5);
+        assert_eq!(
+            ctr.user_mints.get(&alice()).unwrap(),
+            UserDailyMint { minted: 2, day: 5 }
+        );
+
+        assert_eq!(
+            ctr.user_mints.get(&bob()).unwrap(),
+            UserDailyMint { minted: 4, day: 1 },
+            "bob should be still in the old day"
+        );
+        ctr.mint(bob(), 1.into());
+        assert_eq!(
+            ctr.user_mints.get(&bob()).unwrap(),
+            UserDailyMint { minted: 1, day: 5 },
+        );
+        assert_eq!(ctr.daily_mints, 3);
+        assert_eq!(ctr.last_mint_day, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "user daily mint quota used")]
+    fn mint_exceed_user_quota() {
+        let (_, mut ctr) = setup();
+        ctr.mint(alice(), 5.into());
+        ctr.mint(alice(), 6.into());
+    }
+
+    #[test]
+    #[should_panic(expected = "total daily mint quota exceeded. Used: 24")]
+    fn mint_exceed_total_quota() {
+        let (_, mut ctr) = setup();
+        ctr.mint(alice(), 8.into());
+        ctr.mint(bob(), 8.into());
+        ctr.mint(charlie(), 8.into());
+    }
 }
