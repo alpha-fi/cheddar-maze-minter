@@ -19,4 +19,5 @@ pub struct Config {
     pub active: bool,
     pub daily_quota: U128,
     pub user_quota: U128,
+    pub daily_use: U128,
 }

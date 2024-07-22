@@ -61,6 +61,7 @@ impl Contract {
             active: self.active,
             daily_quota: self.daily_quota.into(),
             user_quota: self.user_quota.into(),
+            daily_use: self.daily_mints.into(),
         }
     }
 
