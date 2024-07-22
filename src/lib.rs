@@ -79,14 +79,15 @@ impl Contract {
         );
         let day = env::block_timestamp_ms() / DAY_MS;
         
-        let user_amount: u128 = amount.into();
+        let amount: u128 = amount.into();
         let referral_to_mint: u128 = if referral.is_some() {
-            (user_amount / 20) as u128
+            (amount / 20) as u128
         } else {
             0
         };
+        let user_amount: u128 = amount - referral_to_mint;
         if day == self.last_mint_day {
-            self.daily_mints += user_amount;
+            self.daily_mints += amount;
             require!(
                 self.daily_mints <= self.daily_quota,
                 format!(
@@ -96,7 +97,7 @@ impl Contract {
             );
         } else {
             self.last_mint_day = day;
-            self.daily_mints = user_amount;
+            self.daily_mints = amount;
         }
 
         let user_minted = self.mint_to_user(recipient, user_amount);
