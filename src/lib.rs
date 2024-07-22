@@ -1,6 +1,7 @@
 use near_sdk::collections::UnorderedMap;
 use near_sdk::json_types::U128;
 use near_sdk::{env, ext_contract, log, near, require, AccountId, Gas, NearToken, PanicOnDefault};
+use std::cmp::min;
 
 mod storage;
 
@@ -68,15 +69,23 @@ impl Contract {
     //
 
     /// only minter can mint
+    /// Returns a tuple. On first index, is the amount minted to the user. In the second, the amount minted to the referral
     #[payable]
-    pub fn mint(&mut self, recipient: AccountId, amount: U128) {
+    pub fn mint(&mut self, recipient: AccountId, amount: U128, referral: Option<AccountId>) -> (u128, u128) {
         self.assert_minter();
         require!(
             env::prepaid_gas() >= Gas::from_tgas(30),
             "at least 30tgas must be attached"
         );
         let day = env::block_timestamp_ms() / DAY_MS;
+        
         let amount: u128 = amount.into();
+        let referral_to_mint: u128 = if referral.is_some() {
+            (amount / 20) as u128
+        } else {
+            0
+        };
+        let user_amount: u128 = amount - referral_to_mint;
         if day == self.last_mint_day {
             self.daily_mints += amount;
             require!(
@@ -86,37 +95,44 @@ impl Contract {
                     self.daily_mints
                 )
             );
-            require!(amount < self.user_quota, "amount above user quota");
         } else {
             self.last_mint_day = day;
             self.daily_mints = amount;
         }
 
-        let mut minted = 0;
-        match self.user_mints.get(&recipient) {
+        let user_minted = self.mint_to_user(recipient, user_amount);
+        if referral.is_some() {
+            ext_cheddar::ext(self.cheddar.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .ft_mint(referral.unwrap(), referral_to_mint.into(), None);    
+        }
+
+        (user_minted, referral_to_mint)
+    }
+
+    fn mint_to_user(&mut self, user: AccountId, amount: u128) -> u128 {
+        let mut user_minted = 0;
+        match self.user_mints.get(&user) {
             None => (),
             Some(x) => {
-                if x.day == day {
-                    minted = x.minted;
+                if x.day == self.last_mint_day {
+                    user_minted = x.minted;
                 }
             }
         }
-        minted += amount;
-        require!(minted <= self.user_quota, "user daily mint quota used");
+        if user_minted >= self.user_quota {
+            return 0u128;
+        }
+        
+        let amount_to_mint = min(amount, self.user_quota - user_minted);
+        user_minted += amount_to_mint;
         self.user_mints
-            .insert(&recipient, &UserDailyMint { day, minted });
+            .insert(&user, &UserDailyMint { day: self.last_mint_day, minted: user_minted });
 
         ext_cheddar::ext(self.cheddar.clone())
-            .with_attached_deposit(NearToken::from_yoctonear(1))
-            .ft_mint(recipient, amount.into(), None);
-        // ext_cheddar::ft_mint(
-        //     self.cheddar.clone(),
-        //     1.into(),
-        //     None,
-        //     &self.cheddar_id,
-        //     ONE_YOCTO,
-        //     GAS_FOR_FT_TRANSFER,
-        // );
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .ft_mint(user, amount_to_mint.into(), None);
+        amount_to_mint
     }
 
     pub fn admin_toggle_active(&mut self) {
@@ -219,14 +235,14 @@ mod tests {
         let (mut ctx, mut ctr) = setup();
         ctx.predecessor_account_id = admin();
         testing_env!(ctx);
-        ctr.mint(alice(), 1.into())
+        ctr.mint(alice(), 1.into(), None);
     }
 
     #[test]
     fn mint() {
         let (mut ctx, mut ctr) = setup();
-        ctr.mint(alice(), 1.into());
-        ctr.mint(alice(), 9.into());
+        ctr.mint(alice(), 1.into(), None);
+        ctr.mint(alice(), 9.into(), None);
         assert_eq!(
             ctr.user_mints.get(&alice()).unwrap(),
             UserDailyMint { minted: 10, day: 1 }
@@ -234,7 +250,7 @@ mod tests {
         assert_eq!(ctr.daily_mints, 10);
         assert_eq!(ctr.last_mint_day, 1);
 
-        ctr.mint(bob(), 4.into());
+        ctr.mint(bob(), 4.into(), None);
         // recheck alice
         assert_eq!(
             ctr.user_mints.get(&alice()).unwrap(),
@@ -245,20 +261,20 @@ mod tests {
             UserDailyMint { minted: 4, day: 1 }
         );
 
-        ctr.mint(charlie(), 8.into());
+        ctr.mint(charlie(), 8.into(), None);
         assert_eq!(ctr.last_mint_day, 1);
         assert_eq!(ctr.daily_mints, 22);
 
         ctx.block_timestamp += DAY_MS * MSECOND;
         testing_env!(ctx.clone());
-        ctr.mint(alice(), 7.into());
+        ctr.mint(alice(), 7.into(), None);
         assert_eq!(ctr.daily_mints, 7);
         assert_eq!(ctr.last_mint_day, 2);
 
         // same day but a bit later
         ctx.block_timestamp += DAY_MS / 2 * MSECOND;
         testing_env!(ctx.clone());
-        ctr.mint(alice(), 2.into());
+        ctr.mint(alice(), 2.into(), None);
         assert_eq!(ctr.daily_mints, 9);
         assert_eq!(ctr.last_mint_day, 2);
         assert_eq!(
@@ -269,7 +285,7 @@ mod tests {
         // few days later
         ctx.block_timestamp += 3 * DAY_MS * MSECOND;
         testing_env!(ctx.clone());
-        ctr.mint(alice(), 2.into());
+        ctr.mint(alice(), 2.into(), None);
         assert_eq!(ctr.daily_mints, 2);
         assert_eq!(ctr.last_mint_day, 5);
         assert_eq!(
@@ -282,7 +298,7 @@ mod tests {
             UserDailyMint { minted: 4, day: 1 },
             "bob should be still in the old day"
         );
-        ctr.mint(bob(), 1.into());
+        ctr.mint(bob(), 1.into(), None);
         assert_eq!(
             ctr.user_mints.get(&bob()).unwrap(),
             UserDailyMint { minted: 1, day: 5 },
@@ -292,19 +308,29 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "user daily mint quota used")]
     fn mint_exceed_user_quota() {
         let (_, mut ctr) = setup();
-        ctr.mint(alice(), 5.into());
-        ctr.mint(alice(), 6.into());
+        ctr.mint(alice(), 5.into(), None);
+        let (user_minted, referral_minted) = ctr.mint(alice(), 6.into(), None);
+        assert_eq!(user_minted, 5);
+        assert_eq!(referral_minted, 0);
     }
 
     #[test]
     #[should_panic(expected = "total daily mint quota exceeded. Used: 24")]
     fn mint_exceed_total_quota() {
         let (_, mut ctr) = setup();
-        ctr.mint(alice(), 8.into());
-        ctr.mint(bob(), 8.into());
-        ctr.mint(charlie(), 8.into());
+        ctr.mint(alice(), 8.into(), None);
+        ctr.mint(bob(), 8.into(), None);
+        ctr.mint(charlie(), 8.into(), None);
+    }
+
+    #[test]
+    fn mint_with_referral() {
+        let (_, mut ctr) = setup();
+        let (_, referral_minted) = ctr.mint(alice(), 20.into(), Some(bob()));
+        assert_eq!(referral_minted, 1);
+        assert_eq!(ctr.user_mints.get(&alice()).unwrap().minted, 10);
+        assert_eq!(ctr.user_mints.get(&bob()).is_none(), true);
     }
 }
