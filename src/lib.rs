@@ -82,7 +82,7 @@ impl Contract {
         
         let amount: u128 = amount.into();
         let referral_to_mint: u128 = if referral.is_some() {
-            (amount / 20) as u128
+            amount / 20
         } else {
             0
         };
@@ -102,10 +102,10 @@ impl Contract {
         }
 
         let user_minted = self.mint_to_user(recipient, user_amount);
-        if referral.is_some() {
+        if let Some(referral) = referral {
             ext_cheddar::ext(self.cheddar.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
-                .ft_mint(referral.unwrap(), referral_to_mint.into(), None);    
+                .ft_mint(referral, referral_to_mint.into(), None);
         }
 
         (user_minted, referral_to_mint)
